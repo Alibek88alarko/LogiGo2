@@ -42,10 +42,12 @@ def extract_transportation_info(client, body):
 Вы помощник, который извлекает информацию из писем, связанных с перевозками и ценовыми предложениями, для дальнейшего анализа.
 Пожалуйста, прочитайте следующее письмо и извлеките информацию о перевозке, сосредоточившись на ключевых деталях, таких как:
 
-- Тип запроса (котировка, запрос на перевозку, запрос цены)
 - Место отправления
 - Место назначения
 - Детали груза
+- Тип письма (запрос на перевозку или ответ на запрос или другое)
+- Тип запроса
+- Тип транспортировки
 - Даты
 - Цена
 - Дополнительная информация
@@ -57,10 +59,13 @@ def extract_transportation_info(client, body):
 
 Пожалуйста, предоставьте извлеченную информацию в следующем формате:
 
-Тип запроса:
+Тип письма:
 Место отправления:
 Место назначения:
 Детали груза:
+Тип письма:
+Тип запроса: 
+Тип транспортировки:
 Даты:
 Цена:
 Дополнительная информация:
@@ -162,9 +167,9 @@ def process_emails():
                 if transportation_info:
                     # Если удалось извлечь информацию, проверяем наличие цены или типа запроса
                     price = transportation_info.get('цена', '').strip()
-                    request_type = transportation_info.get('тип запроса', '').strip().lower()
+                    query_type = transportation_info.get('Тип письма', '').strip().lower()
 
-                    if price or 'запрос' in request_type:
+                    if price or 'запрос' in query_type:
                         # Если есть цена или указание на запрос, формируем данные для сохранения
                         email_data = {
                             'entry_id': entry_id,
@@ -172,10 +177,12 @@ def process_emails():
                             'sender': sender,
                             'received_time': received_time,
                             'body': full_body,
-                            'request_type': transportation_info.get('тип запроса', ''),
+                            'query_type': transportation_info.get('Тип письма', ''),
+                            'request_type': transportation_info.get('Тип запроса', ''),
                             'origin': transportation_info.get('место отправления', ''),
                             'destination': transportation_info.get('место назначения', ''),
                             'cargo_details': transportation_info.get('детали груза', ''),
+                            'transport_type': transportation_info.get('тип транспортировки', ''),
                             'dates': transportation_info.get('даты', ''),
                             'price': price,
                             'additional_info': transportation_info.get('дополнительная информация', ''),
@@ -194,10 +201,11 @@ def process_emails():
                             'sender': sender,
                             'received_time': received_time,
                             'body': full_body,
-                            'request_type': '',
+                            'query_type': '',
                             'origin': '',
                             'destination': '',
                             'cargo_details': '',
+                            'transport_type': '',
                             'dates': '',
                             'price': '',
                             'additional_info': '',
@@ -221,8 +229,8 @@ def process_emails():
     for email_record in emails_from_db:
         try:
             # Распаковываем данные письма из записи базы данных
-            (id, entry_id, subject, sender, received_time, body, request_type,
-             origin, destination, cargo_details, dates, price, additional_info, processed) = email_record
+            (id, entry_id, subject, sender, received_time, body, query_type,
+             origin, destination, cargo_details, transport_type, dates, price, additional_info, processed) = email_record
 
             # Если письмо уже обработано, пропускаем его
             if processed:
@@ -244,26 +252,30 @@ def process_emails():
             if transportation_info:
                 # Если удалось извлечь информацию, проверяем наличие цены или типа запроса
                 price = transportation_info.get('цена', '').strip()
-                request_type = transportation_info.get('тип запроса', '').strip().lower()
+                query_type = transportation_info.get('Тип письма', '').strip().lower()
 
-                if price or 'запрос' in request_type:
-                    # Если есть цена или указание на запрос, обновляем данные письма в базе данных
+                if price or 'запрос' in query_type:
+                    # Если есть цена или указание на запрос или ответ на запрос, обновляем данные письма в базе данных
                     cursor.execute('''
                         UPDATE emails SET
-                            request_type = ?,
                             origin = ?,
                             destination = ?,
                             cargo_details = ?,
+                            query_type = ?,
+                            transport_type = ?,
                             dates = ?,
                             price = ?,
                             additional_info = ?,
                             processed = 1
                         WHERE id = ?
                     ''', (
-                        transportation_info.get('тип запроса', ''),
+                   
                         transportation_info.get('место отправления', ''),
                         transportation_info.get('место назначения', ''),
                         transportation_info.get('детали груза', ''),
+                        transportation_info.get('Тип письма', ''),
+                        transportation_info.get('Тип запроса', ''),
+                        transportation_info.get('тип транспортировки', ''),
                         transportation_info.get('даты', ''),
                         price,
                         transportation_info.get('дополнительная информация', ''),
