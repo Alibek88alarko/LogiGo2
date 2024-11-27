@@ -73,7 +73,7 @@ def extract_transportation_info(client, combined_data):
         completion_tokens = usage.completion_tokens
         total_tokens = usage.total_tokens
 
-         # Расчёт стоимости
+        # Расчёт стоимости
         input_cost = (prompt_tokens / 1000) * COST_PER_1000_INPUT_TOKENS
         output_cost = (completion_tokens / 1000) * COST_PER_1000_OUTPUT_TOKENS
         total_cost = input_cost + output_cost
@@ -129,6 +129,8 @@ def analyze_and_migrate():
     processed_emails = 0
     skipped_emails = 0
 
+    logger.info(f"Найдено писем для обработки: {total_emails}")
+
     # Обработка каждой записи
     for email in emails:
         email_id, request_type, origin, destination, cargo_details, price, additional_info, transport_type = email
@@ -148,81 +150,101 @@ def analyze_and_migrate():
 Тип транспорта: {transport_type}
 """
 
-        # Вызов ИИ для анализа данных
-        analyzed_data = extract_transportation_info(client, combined_data)
+        try:
+            # Начало транзакции
+            conn.execute('BEGIN')
 
-        if not analyzed_data:
-            logger.info(f"Пропущено письмо с email_id {email_id}: информация о перевозке отсутствует.")
+            # Вызов ИИ для анализа данных
+            analyzed_data = extract_transportation_info(client, combined_data)
+
+            if not analyzed_data:
+                logger.info(f"Пропущено письмо с email_id {email_id}: информация о перевозке отсутствует.")
+                logger.debug(f"Содержимое письма: {combined_data}")
+                logger.debug(f"Ответ модели: {analyzed_data}")
+                # Отмечаем письмо как обработанное для миграции
+                cursor.execute("UPDATE emails SET migration_processed = 1 WHERE id = ?", (email_id,))
+                conn.commit()
+                skipped_emails += 1
+                continue
+
+            # Извлечение структурированных данных из анализа
+            structured_route = {
+                "origin": analyzed_data.get("место отправления", origin),
+                "destination": analyzed_data.get("место назначения", destination)
+            }
+            structured_price = analyzed_data.get("цена", price)
+            transport_subtype = analyzed_data.get("тип транспортировки", transport_type)
+            transport_size = analyzed_data.get("детали груза", cargo_details)
+
+            logger.debug(f"Структурированные данные: {structured_route}, {structured_price}, {transport_subtype}, {transport_size}")
+
+            # === Маршруты (routes) ===
+            origin = structured_route["origin"]
+            destination = structured_route["destination"]
+            cursor.execute("SELECT id FROM routes WHERE loading_location = ? AND unloading_location = ?", (origin, destination))
+            route = cursor.fetchone()
+
+            if route:
+                route_id = route[0]
+                logger.debug(f"Найден существующий маршрут с id {route_id}.")
+            else:
+                cursor.execute("INSERT INTO routes (loading_location, unloading_location) VALUES (?, ?)", (origin, destination))
+                route_id = cursor.lastrowid
+                logger.debug(f"Добавлен новый маршрут с id {route_id}.")
+
+            # === Типы транспорта (transport_types) ===
+            if transport_type:
+                cursor.execute("SELECT id FROM transport_types WHERE type = ?", (transport_type,))
+                transport_type_record = cursor.fetchone()
+
+                if transport_type_record:
+                    transport_type_id = transport_type_record[0]
+                    logger.debug(f"Найден существующий тип транспорта с id {transport_type_id}.")
+                else:
+                    cursor.execute("INSERT INTO transport_types (type) VALUES (?)", (transport_type,))
+                    transport_type_id = cursor.lastrowid
+                    logger.debug(f"Добавлен новый тип транспорта с id {transport_type_id}.")
+
+                # === Детали транспорта (transport_details) ===
+                cursor.execute("SELECT id FROM transport_details WHERE transport_type_id = ? AND subtype = ? AND size = ?", 
+                               (transport_type_id, transport_subtype, transport_size))
+                transport_detail = cursor.fetchone()
+
+                if transport_detail:
+                    transport_id = transport_detail[0]
+                    logger.debug(f"Найден существующий деталь транспорта с id {transport_id}.")
+                else:
+                    cursor.execute("""
+                        INSERT INTO transport_details (transport_type_id, subtype, size) 
+                        VALUES (?, ?, ?)
+                    """, (transport_type_id, transport_subtype, transport_size))
+                    transport_id = cursor.lastrowid
+                    logger.debug(f"Добавлена новая деталь транспорта с id {transport_id}.")
+
+                # === Цены (prices) ===
+                cursor.execute("INSERT INTO prices (transport_id, route_id, price, email_id) VALUES (?, ?, ?, ?)", 
+                               (transport_id, route_id, structured_price, email_id))
+                logger.debug(f"Добавлена новая запись в таблицу 'prices' для email_id {email_id}.")
+
             # Отмечаем письмо как обработанное для миграции
             cursor.execute("UPDATE emails SET migration_processed = 1 WHERE id = ?", (email_id,))
+            # Коммит всех изменений для текущего письма
             conn.commit()
+            processed_emails += 1
+            logger.info(f"Письмо с id {email_id} успешно обработано.")
+
+        except Exception as e:
+            # Откат транзакции в случае ошибки
+            conn.rollback()
+            logger.error(f"Ошибка при обработке письма с id {email_id}: {e}")
+            logger.exception("Трассировка ошибки:")
             skipped_emails += 1
             continue
-
-        # Извлечение структурированных данных из анализа
-        structured_route = {
-            "origin": analyzed_data.get("место отправления", origin),
-            "destination": analyzed_data.get("место назначения", destination)
-        }
-        structured_price = analyzed_data.get("цена", price)
-        transport_subtype = analyzed_data.get("тип транспортировки", transport_type)
-        transport_size = analyzed_data.get("детали груза", cargo_details)
-
-        # === Маршруты (routes) ===
-        origin = structured_route["origin"]
-        destination = structured_route["destination"]
-        cursor.execute("SELECT id FROM routes WHERE loading_location = ? AND unloading_location = ?", (origin, destination))
-        route = cursor.fetchone()
-
-        if route:
-            route_id = route[0]
-        else:
-            cursor.execute("INSERT INTO routes (loading_location, unloading_location) VALUES (?, ?)", (origin, destination))
-            route_id = cursor.lastrowid
-            conn.commit()
-
-        # === Типы транспорта (transport_types) ===
-        if transport_type:
-            cursor.execute("SELECT id FROM transport_types WHERE type = ?", (transport_type,))
-            transport_type_record = cursor.fetchone()
-
-            if transport_type_record:
-                transport_type_id = transport_type_record[0]
-            else:
-                cursor.execute("INSERT INTO transport_types (type) VALUES (?)", (transport_type,))
-                transport_type_id = cursor.lastrowid
-                conn.commit()
-
-            # === Детали транспорта (transport_details) ===
-            cursor.execute("SELECT id FROM transport_details WHERE transport_type_id = ? AND subtype = ? AND size = ?", 
-                           (transport_type_id, transport_subtype, transport_size))
-            transport_detail = cursor.fetchone()
-
-            if transport_detail:
-                transport_id = transport_detail[0]
-            else:
-                cursor.execute("""
-                    INSERT INTO transport_details (transport_type_id, subtype, size) 
-                    VALUES (?, ?, ?)
-                """, (transport_type_id, transport_subtype, transport_size))
-                transport_id = cursor.lastrowid
-                conn.commit()
-
-            # === Цены (prices) ===
-            cursor.execute("INSERT INTO prices (transport_id, route_id, price, email_id) VALUES (?, ?, ?, ?)", 
-                           (transport_id, route_id, structured_price, email_id))
-            conn.commit()
-
-        # Отмечаем письмо как обработанное для миграции
-        cursor.execute("UPDATE emails SET migration_processed = 1 WHERE id = ?", (email_id,))
-        conn.commit()
-        processed_emails += 1
-        logger.info(f"Письмо с id {email_id} успешно обработано.")
 
     # Логирование итогов
     logger.info(f"Всего писем: {total_emails}, Обработано: {processed_emails}, Пропущено: {skipped_emails}")
 
-    # Сохранение изменений и закрытие соединения
+    # Закрытие соединения
     conn.close()
     print("Данные успешно структурированы и перенесены.")
 
